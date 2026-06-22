@@ -206,7 +206,7 @@ export default function App() {
               </div>
               <p style={{ color: C.sub, fontSize: 14.5, lineHeight: 1.7, margin: "14px 2px 0", fontWeight: 400 }}>
                 25分集中 + 5分休憩のポモドーロタイマー。<br />
-                1行ごとにタスクを改行して追加すれば、<br />1日のセットが完成します。
+                タスクを改行で追加して1日のセットを作成。
               </p>
             </div>
 
