@@ -144,6 +144,10 @@ export default function App() {
   const openTasks = tasks.filter((t) => !t.done);
   const doneLog = tasks.filter((t) => t.done);
   const remaining = openTasks.length;
+  // Today's summary (option A): a closing one-liner shown when every task is
+  // done. No history is stored — it's derived live from the current set.
+  const focusMins = doneLog.reduce((s, t) => s + (t.mins || 0), 0);
+  const allDone = openTasks.length === 0 && doneLog.length > 0;
   const isBreak = phase === "break" || phase === "breakDone";
   const total = (isBreak ? BREAK_MIN : WORK_MIN) * 60;
   const progress = activeTask ? 1 - secondsLeft / total : 0;
@@ -243,6 +247,21 @@ export default function App() {
                       overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {activeTask.text}
                     </div>
+                  </div>
+                </div>
+              ) : allDone ? (
+                <div style={{ padding: "16px 0 4px" }}>
+                  <div style={{ fontSize: 18, fontWeight: 600, color: C.text, marginBottom: 12, letterSpacing: 0.3 }}>
+                    今日のリズム、おつかれさま
+                  </div>
+                  <div style={{ display: "inline-flex", alignItems: "center", gap: 14, color: C.sub, fontSize: 15 }}>
+                    <span><span style={{ color: C.accent, fontWeight: 700 }}>{doneLog.length}</span> タスク完了</span>
+                    {focusMins > 0 && (
+                      <>
+                        <span style={{ color: C.line }}>·</span>
+                        <span>集中 <span style={{ color: C.accent, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtMins(focusMins)}</span></span>
+                      </>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -355,6 +374,10 @@ export default function App() {
   );
 }
 
+function fmtMins(m) {
+  const h = Math.floor(m / 60), mm = m % 60;
+  return h > 0 ? `${h}時間${mm}分` : `${mm}分`;
+}
 function primaryBtn(d) {
   return { width: "100%", marginTop: 16, padding: "16px", borderRadius: 14, fontSize: 17, fontWeight: 600,
     cursor: d ? "default" : "pointer", background: d ? "#2c2c2e" : C.accent, color: d ? C.sub : "#fff",
