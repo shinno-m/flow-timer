@@ -1,0 +1,19 @@
+html {
+  background: #000000;
+  /* Prevent the iOS rubber-band scroll from revealing white behind the app. */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: #000000;
+  /* Disable text selection / callout on long-press (used for "revive" gesture). */
+  -webkit-touch-callout: none;
+  overscroll-behavior-y: none;
+}
+
+#root {
+  min-height: 100vh;
+  /* Dynamic viewport height: avoids the iOS Safari toolbar jump. */
+  min-height: 100dvh;
+}
