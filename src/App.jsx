@@ -41,6 +41,9 @@ export default function App() {
   // This avoids the clock silently "catching up" on time the app was closed.
   const [running, setRunning] = useState(false);
   const [addText, setAddText] = useState("");
+  // Free-text memo for on-hold / follow-up items. Shared across both screens
+  // and persisted, so pending notes survive reloads until promoted to a task.
+  const [memo, setMemo] = useState(saved?.memo ?? "");
   const [revivingId, setRevivingId] = useState(null);
   const tickRef = useRef(null);
   const reviveTimer = useRef(null);
@@ -50,10 +53,10 @@ export default function App() {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ tasks, activeId, phase, secondsLeft })
+        JSON.stringify({ tasks, activeId, phase, secondsLeft, memo })
       );
     } catch (e) {}
-  }, [tasks, activeId, phase, secondsLeft]);
+  }, [tasks, activeId, phase, secondsLeft, memo]);
 
   useEffect(() => {
     if (!running) return;
@@ -154,6 +157,21 @@ export default function App() {
     ? "calc(env(safe-area-inset-bottom, 0px) + 128px)"
     : "calc(env(safe-area-inset-bottom, 0px) + 36px)";
 
+  // Shared memo field, rendered on both the start screen and the task screen.
+  const memoBlock = (
+    <div style={{ margin: "28px 0 22px" }}>
+      <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: 0.5, color: C.sub, margin: "0 6px 8px" }}>
+        メモ
+      </div>
+      <textarea className="ipt" value={memo} onChange={(e) => setMemo(e.target.value)}
+        placeholder={"保留中・フォロー中のメモ\n進展したらタスクに追加"}
+        rows={4}
+        style={{ width: "100%", padding: 16, borderRadius: 16, border: `1px solid ${C.line}`,
+          fontSize: 16, fontFamily: FONT, resize: "vertical", boxSizing: "border-box",
+          color: C.text, background: C.card, lineHeight: 1.8 }} />
+    </div>
+  );
+
   return (
     <div style={{ minHeight: "100dvh", background: C.bg, color: C.text, fontFamily: FONT }}>
       <style>{`
@@ -199,6 +217,7 @@ export default function App() {
                 fontSize: 16, fontFamily: FONT, resize: "vertical", boxSizing: "border-box",
                 color: C.text, background: C.card, lineHeight: 1.9 }} />
             <button onClick={makeList} disabled={!raw.trim()} style={primaryBtn(!raw.trim())}>はじめる</button>
+            {memoBlock}
           </section>
         ) : (
           <>
@@ -306,6 +325,8 @@ export default function App() {
                 </section>
               </>
             )}
+
+            {memoBlock}
 
             <button onClick={resetAll} style={resetBtn}>リセット</button>
           </>
