@@ -95,8 +95,9 @@ export default function App() {
   function handlePhaseEnd() {
     beep();
     if (phase === "work") {
-      // Auto-advance to the break; staying "running" lets the effect re-anchor
-      // the deadline for the new 5-minute phase.
+      // The 25-minute focus block elapsed → 5-minute break. Bank the active
+      // task's worked time so the break minutes are not counted toward it.
+      setTasks((ts) => bankSegment(ts, activeId));
       setPhase("break"); setSecondsLeft(BREAK_MIN * 60);
     } else if (phase === "break") {
       setPhase("breakDone"); setRunning(false);
@@ -115,13 +116,32 @@ export default function App() {
   }
   function toggleStar(id) { setTasks((ts) => sortByStar(ts.map((t) => (t.id === id ? { ...t, star: !t.star } : t)))); }
   function startTask(id) {
-    setTasks((ts) => ts.map((t) => (t.id === id ? { ...t, startedAt: Date.now() } : t)));
-    setActiveId(id); setPhase("work"); setSecondsLeft(WORK_MIN * 60); setRunning(true);
+    setTasks((ts) => {
+      // Switching away from another active task mid-block: bank its worked time.
+      const banked = activeId && activeId !== id ? bankSegment(ts, activeId) : ts;
+      return banked.map((t) => (t.id === id ? { ...t, startedAt: Date.now() } : t));
+    });
+    setActiveId(id);
+    // Pomodoro: keep the running 25-minute block when switching tasks. Only start
+    // a fresh block when we're not already inside a focus phase (idle / after break).
+    if (phase !== "work") { setPhase("work"); setSecondsLeft(WORK_MIN * 60); }
+    setRunning(true);
   }
-  function toggleRun() { setRunning((r) => !r); }
+  function toggleRun() {
+    const goingToRun = !running;
+    // Pause/resume the active task's worked-time clock too, but only during work.
+    if (phase === "work") {
+      if (goingToRun) setTasks((ts) => ts.map((t) => (t.id === activeId ? { ...t, startedAt: Date.now() } : t)));
+      else setTasks((ts) => bankSegment(ts, activeId));
+    }
+    setRunning(goingToRun);
+  }
   function nextTask() {
-    const next = tasks.find((t) => !t.done && t.id !== activeId);
-    if (next) startTask(next.id);
+    // After a break: resume the still-open task if any, otherwise move to the
+    // next open task. Either way startTask begins a fresh 25-minute block.
+    const current = tasks.find((t) => t.id === activeId && !t.done);
+    const target = current || tasks.find((t) => !t.done);
+    if (target) startTask(target.id);
     else { setActiveId(null); setPhase("idle"); setRunning(false); setSecondsLeft(WORK_MIN * 60); }
   }
   function completeTask(id) {
@@ -130,13 +150,18 @@ export default function App() {
     setTasks((ts) => ts.map((t) => {
       if (t.id !== id) return t;
       const segment = t.startedAt ? Math.max(1, Math.round((now.getTime() - t.startedAt) / 60000)) : 0;
-      const prior = t.mins || 0;
-      const totalMins = prior + segment > 0 ? prior + segment : null;
-      return { ...t, done: true, doneAt: stamp, mins: totalMins, startedAt: null };
+      const total = (t.mins || 0) + segment;
+      return { ...t, done: true, doneAt: stamp, mins: total > 0 ? total : null, startedAt: null };
     }));
-    // Clearing activeId returns the screen to the idle state so the stale
-    // timer ring doesn't linger after the active task is completed.
-    if (id === activeId) { setActiveId(null); setRunning(false); setPhase("idle"); setSecondsLeft(WORK_MIN * 60); }
+    if (id !== activeId) return;
+    if (phase === "work") {
+      // Finished within the focus block → continue the same block on the next
+      // open task (no break). If none remain, end the block (summary shows).
+      const next = tasks.find((t) => !t.done && t.id !== id);
+      if (next) startTask(next.id);
+      else { setActiveId(null); setRunning(false); setPhase("idle"); setSecondsLeft(WORK_MIN * 60); }
+    }
+    // If completed during a break, leave the break running; nextTask resumes after.
   }
   function reviveTask(id) {
     setTasks((ts) => sortByStar(ts.map((t) => (t.id === id ? { ...t, done: false, doneAt: null, startedAt: null } : t))));
@@ -392,6 +417,16 @@ export default function App() {
 function fmtMins(m) {
   const h = Math.floor(m / 60), mm = m % 60;
   return h > 0 ? `${h}時間${mm}分` : `${mm}分`;
+}
+// Add the active task's in-progress segment to its accumulated minutes and clear
+// startedAt. Used when work pauses, the active task changes, or a break begins,
+// so each task only accrues actual worked time (breaks excluded).
+function bankSegment(list, id) {
+  return list.map((t) => {
+    if (t.id !== id || !t.startedAt) return t;
+    const seg = Math.max(1, Math.round((Date.now() - t.startedAt) / 60000));
+    return { ...t, mins: (t.mins || 0) + seg, startedAt: null };
+  });
 }
 function primaryBtn(d) {
   return { width: "100%", marginTop: 16, padding: "16px", borderRadius: 14, fontSize: 17, fontWeight: 600,
