@@ -45,7 +45,10 @@ export default function App() {
   // and persisted, so pending notes survive reloads until promoted to a task.
   const [memo, setMemo] = useState(saved?.memo ?? "");
   const [revivingId, setRevivingId] = useState(null);
-  const tickRef = useRef(null);
+  // Absolute timestamp (ms) when the current running phase ends. The countdown
+  // is derived from this rather than decremented tick-by-tick, so it stays
+  // accurate even if iOS sleeps/throttles timers while the screen is off.
+  const deadlineRef = useRef(null);
   const reviveTimer = useRef(null);
 
   // Persist the meaningful state on every change so a reload restores it.
@@ -60,15 +63,22 @@ export default function App() {
 
   useEffect(() => {
     if (!running) return;
-    tickRef.current = setInterval(() => {
-      setSecondsLeft((s) => {
-        if (s <= 1) { clearInterval(tickRef.current); handlePhaseEnd(); return 0; }
-        return s - 1;
-      });
-    }, 1000);
-    return () => clearInterval(tickRef.current);
+    // Anchor the deadline from the current remaining time whenever the timer
+    // (re)starts or the phase changes.
+    deadlineRef.current = Date.now() + secondsLeft * 1000;
+    const tick = () => {
+      const remaining = Math.round((deadlineRef.current - Date.now()) / 1000);
+      if (remaining <= 0) { setSecondsLeft(0); handlePhaseEnd(); }
+      else { setSecondsLeft(remaining); }
+    };
+    const id = setInterval(tick, 250);
+    // Recompute immediately when the page returns to the foreground (e.g. after
+    // the iPhone wakes from sleep), since setInterval may have been suspended.
+    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
     // eslint-disable-next-line
-  }, [running]);
+  }, [running, phase]);
 
   function beep() {
     try {
@@ -83,9 +93,14 @@ export default function App() {
     } catch (e) {}
   }
   function handlePhaseEnd() {
-    beep(); setRunning(false);
-    if (phase === "work") { setPhase("break"); setSecondsLeft(BREAK_MIN * 60); setRunning(true); }
-    else if (phase === "break") { setPhase("breakDone"); }
+    beep();
+    if (phase === "work") {
+      // Auto-advance to the break; staying "running" lets the effect re-anchor
+      // the deadline for the new 5-minute phase.
+      setPhase("break"); setSecondsLeft(BREAK_MIN * 60);
+    } else if (phase === "break") {
+      setPhase("breakDone"); setRunning(false);
+    }
   }
   function sortByStar(list) { return [...list].sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0)); }
   function makeList() {
