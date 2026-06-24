@@ -113,18 +113,9 @@ export default function App() {
       setTasks((ts) => bankSegment(ts, activeIdRef.current));
       setPhase("break"); setSecondsLeft(BREAK_MIN * 60);
     } else if (phaseRef.current === "break") {
-      // 30-minute cycle: the break ends and the next 25-minute block starts
-      // automatically — no manual "次へ". Resume the still-open task, else the
-      // next open task; if none remain, end the session (summary shows).
-      const list = tasksRef.current;
-      const current = list.find((t) => t.id === activeIdRef.current && !t.done);
-      const target = current || list.find((t) => !t.done);
-      if (target) {
-        setTasks((ts) => ts.map((t) => (t.id === target.id ? { ...t, startedAt: Date.now() } : t)));
-        setActiveId(target.id); setPhase("work"); setSecondsLeft(WORK_MIN * 60);
-      } else {
-        setActiveId(null); setPhase("idle"); setRunning(false); setSecondsLeft(WORK_MIN * 60);
-      }
+      // End of the 30-minute cycle: stop and wait for a manual "次へ", so the
+      // same task is never recorded across extra cycles without the user noticing.
+      setPhase("breakDone"); setRunning(false);
     }
   }
   function sortByStar(list) { return [...list].sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0)); }
@@ -178,6 +169,14 @@ export default function App() {
     }, CARRY_MS);
   }
   function carryEnd() { clearTimeout(carryTimer.current); setCarryingId(null); }
+  function nextTask() {
+    // After a break: resume the still-open task, else the next open task. Begins
+    // a fresh 25-minute block. Triggered manually so cycles aren't auto-stacked.
+    const current = tasks.find((t) => t.id === activeId && !t.done);
+    const target = current || tasks.find((t) => !t.done);
+    if (target) startTask(target.id);
+    else { setActiveId(null); setPhase("idle"); setRunning(false); setSecondsLeft(WORK_MIN * 60); }
+  }
   function onTaskTap(id) {
     if (carrySuppress.current) { carrySuppress.current = false; return; }
     startTask(id);
@@ -231,7 +230,7 @@ export default function App() {
   // done. No history is stored — it's derived live from the current set.
   const focusMins = doneLog.reduce((s, t) => s + (t.mins || 0), 0);
   const allDone = openTasks.length === 0 && doneLog.length > 0;
-  const isBreak = phase === "break";
+  const isBreak = phase === "break" || phase === "breakDone";
   const total = (isBreak ? BREAK_MIN : WORK_MIN) * 60;
   const progress = activeTask ? 1 - secondsLeft / total : 0;
   const ringColor = isBreak ? C.sub : C.accent;
@@ -339,7 +338,7 @@ export default function App() {
                     alignItems: "center", justifyContent: "center" }}>
                     <div style={{ fontSize: 13, letterSpacing: 1, fontWeight: 600,
                       color: isBreak ? C.sub : C.accentDeep, marginBottom: 4 }}>
-                      {phase === "break" ? "休憩 5分" : "集中 25分"}
+                      {phase === "work" ? "集中 25分" : phase === "break" ? "休憩 5分" : "休憩おわり"}
                     </div>
                     <div style={{ fontSize: 64, fontWeight: 200, fontVariantNumeric: "tabular-nums",
                       letterSpacing: -1.5, lineHeight: 1 }}>{mm}:{ss}</div>
@@ -471,9 +470,13 @@ export default function App() {
           paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
           background: "rgba(0,0,0,0.72)", backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)", borderTop: `0.5px solid ${C.line}` }}>
-          <button onClick={toggleRun} style={roundBtn(C.card2, running ? C.text : C.accent)}>
-            {running ? "停止" : "再開"}
-          </button>
+          {phase === "breakDone" ? (
+            <button onClick={nextTask} style={roundBtn(C.accent, "#fff")}>次へ</button>
+          ) : (
+            <button onClick={toggleRun} style={roundBtn(C.card2, running ? C.text : C.accent)}>
+              {running ? "停止" : "再開"}
+            </button>
+          )}
           <button onClick={() => completeTask(activeTask.id)} style={roundBtn(C.card2, C.text)}>完了</button>
         </div>
       )}
