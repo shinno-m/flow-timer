@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 
 const WORK_MIN = 25;
 const BREAK_MIN = 5;
-const REVIVE_MS = 2500;
 const CARRY_MS = 1500; // long-press duration to carry an open task over to the memo
 const STORAGE_KEY = "flow.v1";
 
@@ -45,7 +44,7 @@ export default function App() {
   // Free-text memo for on-hold / follow-up items. Shared across both screens
   // and persisted, so pending notes survive reloads until promoted to a task.
   const [memo, setMemo] = useState(saved?.memo ?? "");
-  const [revivingId, setRevivingId] = useState(null);
+  const [menu, setMenu] = useState(null); // { id, top, right } anchor for the done-task action menu
   const [carryingId, setCarryingId] = useState(null);
   // Last completed session's summary, shown on the start screen after a reset.
   const [lastSummary, setLastSummary] = useState(saved?.lastSummary ?? null);
@@ -53,7 +52,6 @@ export default function App() {
   // is derived from this rather than decremented tick-by-tick, so it stays
   // accurate even if iOS sleeps/throttles timers while the screen is off.
   const deadlineRef = useRef(null);
-  const reviveTimer = useRef(null);
   const carryTimer = useRef(null);
   const carrySuppress = useRef(false); // suppress the tap-to-start click after a carry long-press
   // Refs mirror the latest state so the long-lived timer interval (which keeps a
@@ -203,11 +201,12 @@ export default function App() {
   function reviveTask(id) {
     setTasks((ts) => sortByStar(ts.map((t) => (t.id === id ? { ...t, done: false, doneAt: null, startedAt: null } : t))));
   }
-  function pressStart(id) {
-    setRevivingId(id);
-    reviveTimer.current = setTimeout(() => { reviveTask(id); setRevivingId(null); }, REVIVE_MS);
+  // Open the action menu for a done task, anchored just below its ⋮ button.
+  function openMenu(e, id) {
+    e.stopPropagation();
+    const r = e.currentTarget.getBoundingClientRect();
+    setMenu({ id, top: r.bottom + 6, right: Math.max(12, window.innerWidth - r.right) });
   }
-  function pressEnd() { clearTimeout(reviveTimer.current); setRevivingId(null); }
 
   function resetAll() {
     // Preserve the day's result so the "おつかれさまでした" summary stays visible
@@ -267,9 +266,6 @@ export default function App() {
         .star-btn { background:none;border:none;cursor:pointer;padding:2px;font-size:18px;line-height:1; }
         input::placeholder, textarea::placeholder { color:#48484a; }
         .ipt:focus { outline:none; }
-        @keyframes riseUp { to { transform: translateY(-6px) scale(1.02); box-shadow: 0 8px 24px rgba(127,174,142,0.35); } }
-        .reviving { animation: riseUp ${REVIVE_MS}ms ease forwards; }
-        .revivebar { transition: width ${REVIVE_MS}ms linear; }
         @keyframes fillbar { from { width: 0% } to { width: 100% } }
         .carrybar { animation: fillbar ${CARRY_MS}ms linear forwards; background: ${C.accent}; }
         @keyframes glow { 0%,100% { opacity:.5 } 50% { opacity:1 } }
@@ -425,32 +421,25 @@ export default function App() {
             {doneLog.length > 0 && (
               <>
                 <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: 0.5, color: C.sub,
-                  margin: "0 6px 8px", display: "flex", justifyContent: "space-between" }}>
-                  <span>完了</span>
-                  <span style={{ fontWeight: 400, color: "#5a5a5e" }}>長押しで戻す</span>
+                  margin: "0 6px 8px" }}>
+                  完了
                 </div>
                 <section style={{ background: C.card, borderRadius: 16, overflow: "hidden", marginBottom: 22 }}>
-                  {doneLog.map((t, i) => {
-                    const isReviving = revivingId === t.id;
-                    return (
-                      <div key={t.id} className={isReviving ? "reviving" : ""}
-                        onMouseDown={() => pressStart(t.id)} onMouseUp={pressEnd} onMouseLeave={pressEnd}
-                        onTouchStart={() => pressStart(t.id)} onTouchEnd={pressEnd}
-                        style={{ position: "relative", display: "flex", justifyContent: "space-between",
-                          alignItems: "center", padding: "14px 16px", fontSize: 15, color: C.sub,
-                          borderTop: i === 0 ? "none" : `0.5px solid ${C.line}`,
-                          cursor: "pointer", userSelect: "none", background: C.card, borderRadius: isReviving ? 12 : 0 }}>
-                        <span style={{ textDecoration: "line-through" }}>{t.text}</span>
-                        <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 14, flexShrink: 0, marginLeft: 12 }}>
-                          {t.doneAt}{t.mins != null ? `（${t.mins}分）` : ""}
-                        </span>
-                        {isReviving && (
-                          <div className="revivebar" style={{ position: "absolute", left: 0, bottom: 0, height: 2,
-                            background: C.accent, width: "100%", transformOrigin: "left" }} />
-                        )}
-                      </div>
-                    );
-                  })}
+                  {doneLog.map((t, i) => (
+                    <div key={t.id}
+                      style={{ display: "flex", alignItems: "center", gap: 8, padding: "11px 6px 11px 16px",
+                        fontSize: 15, color: C.sub, borderTop: i === 0 ? "none" : `0.5px solid ${C.line}`,
+                        background: C.card }}>
+                      <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis",
+                        whiteSpace: "nowrap", textDecoration: "line-through" }}>{t.text}</span>
+                      <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 14, flexShrink: 0 }}>
+                        {t.doneAt}{t.mins != null ? `（${t.mins}分）` : ""}
+                      </span>
+                      <button onClick={(e) => openMenu(e, t.id)} aria-label="メニュー"
+                        style={{ background: "none", border: "none", color: C.sub, fontSize: 20, lineHeight: 1,
+                          padding: "6px 10px", cursor: "pointer", flexShrink: 0 }}>⋮</button>
+                    </div>
+                  ))}
                 </section>
               </>
             )}
@@ -479,6 +468,24 @@ export default function App() {
           )}
           <button onClick={() => completeTask(activeTask.id)} style={roundBtn(C.card2, C.text)}>完了</button>
         </div>
+      )}
+
+      {/* Action menu for a completed task (tap ⋮ → 未完了に戻す). */}
+      {menu && (
+        <>
+          <div onClick={() => setMenu(null)}
+            style={{ position: "fixed", inset: 0, zIndex: 25 }} />
+          <div style={{ position: "fixed", top: menu.top, right: menu.right, zIndex: 30,
+            background: C.card2, borderRadius: 12, border: `0.5px solid ${C.line}`,
+            boxShadow: "0 8px 28px rgba(0,0,0,0.55)", overflow: "hidden", minWidth: 150 }}>
+            <button onClick={() => { reviveTask(menu.id); setMenu(null); }}
+              style={{ display: "block", width: "100%", padding: "13px 18px", background: "none",
+                border: "none", color: C.text, fontSize: 15, fontFamily: FONT, cursor: "pointer",
+                whiteSpace: "nowrap", textAlign: "left" }}>
+              未完了に戻す
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
