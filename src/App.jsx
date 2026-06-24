@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 
 const WORK_MIN = 25;
 const BREAK_MIN = 5;
-const CARRY_MS = 1500; // long-press duration to carry an open task over to the memo
 const STORAGE_KEY = "flow.v1";
 
 const C = {
@@ -44,16 +43,13 @@ export default function App() {
   // Free-text memo for on-hold / follow-up items. Shared across both screens
   // and persisted, so pending notes survive reloads until promoted to a task.
   const [memo, setMemo] = useState(saved?.memo ?? "");
-  const [menu, setMenu] = useState(null); // { id, top, right } anchor for the done-task action menu
-  const [carryingId, setCarryingId] = useState(null);
+  const [menu, setMenu] = useState(null); // { id, type, top, right } anchor for a task's action menu
   // Last completed session's summary, shown on the start screen after a reset.
   const [lastSummary, setLastSummary] = useState(saved?.lastSummary ?? null);
   // Absolute timestamp (ms) when the current running phase ends. The countdown
   // is derived from this rather than decremented tick-by-tick, so it stays
   // accurate even if iOS sleeps/throttles timers while the screen is off.
   const deadlineRef = useRef(null);
-  const carryTimer = useRef(null);
-  const carrySuppress = useRef(false); // suppress the tap-to-start click after a carry long-press
   // Refs mirror the latest state so the long-lived timer interval (which keeps a
   // stale closure between phase changes) always reads current values.
   const activeIdRef = useRef(activeId); activeIdRef.current = activeId;
@@ -150,23 +146,14 @@ export default function App() {
     setRunning(goingToRun);
   }
   // Move an unfinished task out of the list and into the memo, to carry it over
-  // to another day. Triggered by a long-press on the task row.
+  // to another day. Triggered from the task's ⋮ menu (a deliberate two-tap action
+  // so it can't be mistaken for tap-to-start).
   function carryOver(id) {
     const t = tasksRef.current.find((x) => x.id === id);
     if (!t) return;
     setMemo((m) => (m ? m + "\n" : "") + t.text);
     setTasks((ts) => ts.filter((x) => x.id !== id));
   }
-  function carryStart(id) {
-    carrySuppress.current = false;
-    setCarryingId(id);
-    carryTimer.current = setTimeout(() => {
-      carryOver(id);
-      setCarryingId(null);
-      carrySuppress.current = true; // the trailing click must not start the task
-    }, CARRY_MS);
-  }
-  function carryEnd() { clearTimeout(carryTimer.current); setCarryingId(null); }
   function nextTask() {
     // After a break: resume the still-open task, else the next open task. Begins
     // a fresh 25-minute block. Triggered manually so cycles aren't auto-stacked.
@@ -174,10 +161,6 @@ export default function App() {
     const target = current || tasks.find((t) => !t.done);
     if (target) startTask(target.id);
     else { setActiveId(null); setPhase("idle"); setRunning(false); setSecondsLeft(WORK_MIN * 60); }
-  }
-  function onTaskTap(id) {
-    if (carrySuppress.current) { carrySuppress.current = false; return; }
-    startTask(id);
   }
   function completeTask(id) {
     const now = new Date();
@@ -201,11 +184,12 @@ export default function App() {
   function reviveTask(id) {
     setTasks((ts) => sortByStar(ts.map((t) => (t.id === id ? { ...t, done: false, doneAt: null, startedAt: null } : t))));
   }
-  // Open the action menu for a done task, anchored just below its ⋮ button.
-  function openMenu(e, id) {
+  // Open a task's action menu, anchored just below its ⋮ button. type is
+  // "done" (→ 未完了に戻す) or "open" (→ メモへ移動).
+  function openMenu(e, id, type) {
     e.stopPropagation();
     const r = e.currentTarget.getBoundingClientRect();
-    setMenu({ id, top: r.bottom + 6, right: Math.max(12, window.innerWidth - r.right) });
+    setMenu({ id, type, top: r.bottom + 6, right: Math.max(12, window.innerWidth - r.right) });
   }
 
   function resetAll() {
@@ -266,8 +250,6 @@ export default function App() {
         .star-btn { background:none;border:none;cursor:pointer;padding:2px;font-size:18px;line-height:1; }
         input::placeholder, textarea::placeholder { color:#48484a; }
         .ipt:focus { outline:none; }
-        @keyframes fillbar { from { width: 0% } to { width: 100% } }
-        .carrybar { animation: fillbar ${CARRY_MS}ms linear forwards; background: ${C.accent}; }
         @keyframes glow { 0%,100% { opacity:.5 } 50% { opacity:1 } }
       `}</style>
 
@@ -367,9 +349,8 @@ export default function App() {
             </section>
 
             <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: 0.5, color: C.sub,
-              margin: "0 6px 8px", display: "flex", justifyContent: "space-between" }}>
-              <span>タスク <span style={{ fontWeight: 400, color: "#5a5a5e" }}>残り {remaining}</span></span>
-              {openTasks.length > 0 && <span style={{ fontWeight: 400, color: "#5a5a5e" }}>長押しでメモへ</span>}
+              margin: "0 6px 8px" }}>
+              タスク <span style={{ fontWeight: 400, color: "#5a5a5e" }}>残り {remaining}</span>
             </div>
             <section style={{ background: C.card, borderRadius: 16, overflow: "hidden", marginBottom: 22 }}>
               {openTasks.length === 0 && (
@@ -377,32 +358,24 @@ export default function App() {
               )}
               {openTasks.map((t, i) => {
                 const isActive = t.id === activeId;
-                const isCarrying = carryingId === t.id;
-                const press = isActive ? {} : {
-                  onClick: () => onTaskTap(t.id),
-                  onMouseDown: () => carryStart(t.id), onMouseUp: carryEnd, onMouseLeave: carryEnd,
-                  onTouchStart: () => carryStart(t.id), onTouchEnd: carryEnd, onTouchMove: carryEnd,
-                };
                 return (
-                  <div key={t.id} {...press}
-                    style={{ position: "relative", display: "flex", alignItems: "center", gap: 11,
-                    padding: "15px 16px", borderTop: i === 0 ? "none" : `0.5px solid ${C.line}`,
-                    cursor: !isActive ? "pointer" : "default", userSelect: "none",
-                    borderRadius: isCarrying ? 12 : 0 }}>
+                  <div key={t.id}
+                    onClick={!isActive ? () => startTask(t.id) : undefined}
+                    style={{ display: "flex", alignItems: "center", gap: 11,
+                    padding: "11px 8px 11px 16px", borderTop: i === 0 ? "none" : `0.5px solid ${C.line}`,
+                    cursor: !isActive ? "pointer" : "default" }}>
                     <button className="star-btn" onClick={(e) => { e.stopPropagation(); toggleStar(t.id); }}
-                      onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}
                       style={{ color: t.star ? C.star : "#48484a" }}>{t.star ? "★" : "☆"}</button>
                     <span style={{ width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
                       display: "grid", placeItems: "center", background: "transparent",
                       border: `1.5px solid ${isActive ? C.accent : "#48484a"}` }}></span>
                     <span style={{ flex: 1, fontSize: 16, color: C.text, fontWeight: isActive ? 600 : 400 }}>{t.text}</span>
                     {isActive ? (
-                      <span style={{ fontSize: 11, color: C.accent, fontWeight: 700, letterSpacing: 1 }}>NOW</span>
+                      <span style={{ fontSize: 11, color: C.accent, fontWeight: 700, letterSpacing: 1, marginRight: 10 }}>NOW</span>
                     ) : (
-                      <span style={{ fontSize: 20, color: "#48484a", lineHeight: 1 }}>›</span>
-                    )}
-                    {isCarrying && (
-                      <div className="carrybar" style={{ position: "absolute", left: 0, bottom: 0, height: 2, width: "100%" }} />
+                      <button onClick={(e) => openMenu(e, t.id, "open")} aria-label="メニュー"
+                        style={{ background: "none", border: "none", color: C.sub, fontSize: 20, lineHeight: 1,
+                          padding: "6px 10px", cursor: "pointer", flexShrink: 0 }}>⋮</button>
                     )}
                   </div>
                 );
@@ -435,7 +408,7 @@ export default function App() {
                       <span style={{ fontVariantNumeric: "tabular-nums", fontSize: 14, flexShrink: 0 }}>
                         {t.doneAt}{t.mins != null ? `（${t.mins}分）` : ""}
                       </span>
-                      <button onClick={(e) => openMenu(e, t.id)} aria-label="メニュー"
+                      <button onClick={(e) => openMenu(e, t.id, "done")} aria-label="メニュー"
                         style={{ background: "none", border: "none", color: C.sub, fontSize: 20, lineHeight: 1,
                           padding: "6px 10px", cursor: "pointer", flexShrink: 0 }}>⋮</button>
                     </div>
@@ -470,7 +443,8 @@ export default function App() {
         </div>
       )}
 
-      {/* Action menu for a completed task (tap ⋮ → 未完了に戻す). */}
+      {/* Action menu for a task: tap ⋮ → confirm the action. Two taps total, so an
+          accidental ⋮ tap just opens a dismissible menu — nothing destructive. */}
       {menu && (
         <>
           <div onClick={() => setMenu(null)}
@@ -478,11 +452,14 @@ export default function App() {
           <div style={{ position: "fixed", top: menu.top, right: menu.right, zIndex: 30,
             background: C.card2, borderRadius: 12, border: `0.5px solid ${C.line}`,
             boxShadow: "0 8px 28px rgba(0,0,0,0.55)", overflow: "hidden", minWidth: 150 }}>
-            <button onClick={() => { reviveTask(menu.id); setMenu(null); }}
+            <button onClick={() => {
+                if (menu.type === "done") reviveTask(menu.id); else carryOver(menu.id);
+                setMenu(null);
+              }}
               style={{ display: "block", width: "100%", padding: "13px 18px", background: "none",
                 border: "none", color: C.text, fontSize: 15, fontFamily: FONT, cursor: "pointer",
                 whiteSpace: "nowrap", textAlign: "left" }}>
-              未完了に戻す
+              {menu.type === "done" ? "未完了に戻す" : "メモへ移動"}
             </button>
           </div>
         </>
