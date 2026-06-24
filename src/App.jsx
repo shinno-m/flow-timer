@@ -3,6 +3,7 @@ import { useState, useEffect, useRef } from "react";
 const WORK_MIN = 25;
 const BREAK_MIN = 5;
 const REVIVE_MS = 2500;
+const CARRY_MS = 1500; // long-press duration to carry an open task over to the memo
 const STORAGE_KEY = "flow.v1";
 
 const C = {
@@ -45,21 +46,31 @@ export default function App() {
   // and persisted, so pending notes survive reloads until promoted to a task.
   const [memo, setMemo] = useState(saved?.memo ?? "");
   const [revivingId, setRevivingId] = useState(null);
+  const [carryingId, setCarryingId] = useState(null);
+  // Last completed session's summary, shown on the start screen after a reset.
+  const [lastSummary, setLastSummary] = useState(saved?.lastSummary ?? null);
   // Absolute timestamp (ms) when the current running phase ends. The countdown
   // is derived from this rather than decremented tick-by-tick, so it stays
   // accurate even if iOS sleeps/throttles timers while the screen is off.
   const deadlineRef = useRef(null);
   const reviveTimer = useRef(null);
+  const carryTimer = useRef(null);
+  const carrySuppress = useRef(false); // suppress the tap-to-start click after a carry long-press
+  // Refs mirror the latest state so the long-lived timer interval (which keeps a
+  // stale closure between phase changes) always reads current values.
+  const activeIdRef = useRef(activeId); activeIdRef.current = activeId;
+  const tasksRef = useRef(tasks); tasksRef.current = tasks;
+  const phaseRef = useRef(phase); phaseRef.current = phase;
 
   // Persist the meaningful state on every change so a reload restores it.
   useEffect(() => {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ tasks, activeId, phase, secondsLeft, memo })
+        JSON.stringify({ tasks, activeId, phase, secondsLeft, memo, lastSummary })
       );
     } catch (e) {}
-  }, [tasks, activeId, phase, secondsLeft, memo]);
+  }, [tasks, activeId, phase, secondsLeft, memo, lastSummary]);
 
   useEffect(() => {
     if (!running) return;
@@ -94,20 +105,33 @@ export default function App() {
   }
   function handlePhaseEnd() {
     beep();
-    if (phase === "work") {
+    // Read current values via refs: this runs from the long-lived interval, whose
+    // closure can be stale after tasks/activeId changed within the same phase.
+    if (phaseRef.current === "work") {
       // The 25-minute focus block elapsed → 5-minute break. Bank the active
       // task's worked time so the break minutes are not counted toward it.
-      setTasks((ts) => bankSegment(ts, activeId));
+      setTasks((ts) => bankSegment(ts, activeIdRef.current));
       setPhase("break"); setSecondsLeft(BREAK_MIN * 60);
-    } else if (phase === "break") {
-      setPhase("breakDone"); setRunning(false);
+    } else if (phaseRef.current === "break") {
+      // 30-minute cycle: the break ends and the next 25-minute block starts
+      // automatically — no manual "次へ". Resume the still-open task, else the
+      // next open task; if none remain, end the session (summary shows).
+      const list = tasksRef.current;
+      const current = list.find((t) => t.id === activeIdRef.current && !t.done);
+      const target = current || list.find((t) => !t.done);
+      if (target) {
+        setTasks((ts) => ts.map((t) => (t.id === target.id ? { ...t, startedAt: Date.now() } : t)));
+        setActiveId(target.id); setPhase("work"); setSecondsLeft(WORK_MIN * 60);
+      } else {
+        setActiveId(null); setPhase("idle"); setRunning(false); setSecondsLeft(WORK_MIN * 60);
+      }
     }
   }
   function sortByStar(list) { return [...list].sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0)); }
   function makeList() {
     const items = raw.split("\n").map((t) => t.trim()).filter(Boolean)
       .map((text, i) => ({ id: Date.now() + i, text, done: false, doneAt: null, star: false, startedAt: null, mins: null }));
-    setTasks(items); setRaw(""); setActiveId(null); setPhase("idle");
+    setTasks(items); setRaw(""); setActiveId(null); setPhase("idle"); setLastSummary(null);
   }
   function addTask() {
     const text = addText.trim(); if (!text) return;
@@ -136,13 +160,27 @@ export default function App() {
     }
     setRunning(goingToRun);
   }
-  function nextTask() {
-    // After a break: resume the still-open task if any, otherwise move to the
-    // next open task. Either way startTask begins a fresh 25-minute block.
-    const current = tasks.find((t) => t.id === activeId && !t.done);
-    const target = current || tasks.find((t) => !t.done);
-    if (target) startTask(target.id);
-    else { setActiveId(null); setPhase("idle"); setRunning(false); setSecondsLeft(WORK_MIN * 60); }
+  // Move an unfinished task out of the list and into the memo, to carry it over
+  // to another day. Triggered by a long-press on the task row.
+  function carryOver(id) {
+    const t = tasksRef.current.find((x) => x.id === id);
+    if (!t) return;
+    setMemo((m) => (m ? m + "\n" : "") + t.text);
+    setTasks((ts) => ts.filter((x) => x.id !== id));
+  }
+  function carryStart(id) {
+    carrySuppress.current = false;
+    setCarryingId(id);
+    carryTimer.current = setTimeout(() => {
+      carryOver(id);
+      setCarryingId(null);
+      carrySuppress.current = true; // the trailing click must not start the task
+    }, CARRY_MS);
+  }
+  function carryEnd() { clearTimeout(carryTimer.current); setCarryingId(null); }
+  function onTaskTap(id) {
+    if (carrySuppress.current) { carrySuppress.current = false; return; }
+    startTask(id);
   }
   function completeTask(id) {
     const now = new Date();
@@ -173,9 +211,14 @@ export default function App() {
   function pressEnd() { clearTimeout(reviveTimer.current); setRevivingId(null); }
 
   function resetAll() {
+    // Preserve the day's result so the "おつかれさまでした" summary stays visible
+    // on the start screen after reset. Memo (carried-over items) is kept too.
+    const done = tasks.filter((t) => t.done);
+    if (done.length > 0) {
+      setLastSummary({ count: done.length, mins: done.reduce((s, t) => s + (t.mins || 0), 0) });
+    }
     setTasks([]); setActiveId(null); setPhase("idle");
     setRunning(false); setSecondsLeft(WORK_MIN * 60);
-    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
   }
 
   const mm = String(Math.floor(secondsLeft / 60)).padStart(2, "0");
@@ -188,7 +231,7 @@ export default function App() {
   // done. No history is stored — it's derived live from the current set.
   const focusMins = doneLog.reduce((s, t) => s + (t.mins || 0), 0);
   const allDone = openTasks.length === 0 && doneLog.length > 0;
-  const isBreak = phase === "break" || phase === "breakDone";
+  const isBreak = phase === "break";
   const total = (isBreak ? BREAK_MIN : WORK_MIN) * 60;
   const progress = activeTask ? 1 - secondsLeft / total : 0;
   const ringColor = isBreak ? C.sub : C.accent;
@@ -228,6 +271,8 @@ export default function App() {
         @keyframes riseUp { to { transform: translateY(-6px) scale(1.02); box-shadow: 0 8px 24px rgba(127,174,142,0.35); } }
         .reviving { animation: riseUp ${REVIVE_MS}ms ease forwards; }
         .revivebar { transition: width ${REVIVE_MS}ms linear; }
+        @keyframes fillbar { from { width: 0% } to { width: 100% } }
+        .carrybar { animation: fillbar ${CARRY_MS}ms linear forwards; background: ${C.accent}; }
         @keyframes glow { 0%,100% { opacity:.5 } 50% { opacity:1 } }
       `}</style>
 
@@ -254,6 +299,21 @@ export default function App() {
               </p>
             </div>
 
+            {lastSummary && (
+              <div style={{ background: C.card, borderRadius: 16, padding: "16px 18px", marginBottom: 18 }}>
+                <div style={{ fontSize: 15, fontWeight: 600, color: C.text, marginBottom: 7 }}>おつかれさまでした</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, color: C.sub, fontSize: 14 }}>
+                  <span><span style={{ color: C.accent, fontWeight: 700 }}>{lastSummary.count}</span> タスク完了</span>
+                  {lastSummary.mins > 0 && (
+                    <>
+                      <span style={{ color: C.line }}>·</span>
+                      <span>集中 <span style={{ color: C.accent, fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>{fmtMins(lastSummary.mins)}</span></span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
             <textarea className="ipt" value={raw} onChange={(e) => setRaw(e.target.value)}
               placeholder={"例）\n資料レビュー\nメール返信\n見積もり確認"}
               rows={6}
@@ -279,7 +339,7 @@ export default function App() {
                     alignItems: "center", justifyContent: "center" }}>
                     <div style={{ fontSize: 13, letterSpacing: 1, fontWeight: 600,
                       color: isBreak ? C.sub : C.accentDeep, marginBottom: 4 }}>
-                      {phase === "work" ? "集中 25分" : phase === "break" ? "休憩 5分" : "休憩おわり"}
+                      {phase === "break" ? "休憩 5分" : "集中 25分"}
                     </div>
                     <div style={{ fontSize: 64, fontWeight: 200, fontVariantNumeric: "tabular-nums",
                       letterSpacing: -1.5, lineHeight: 1 }}>{mm}:{ss}</div>
@@ -313,7 +373,8 @@ export default function App() {
 
             <div style={{ fontSize: 13, fontWeight: 600, letterSpacing: 0.5, color: C.sub,
               margin: "0 6px 8px", display: "flex", justifyContent: "space-between" }}>
-              <span>タスク</span><span>残り {remaining}</span>
+              <span>タスク <span style={{ fontWeight: 400, color: "#5a5a5e" }}>残り {remaining}</span></span>
+              {openTasks.length > 0 && <span style={{ fontWeight: 400, color: "#5a5a5e" }}>長押しでメモへ</span>}
             </div>
             <section style={{ background: C.card, borderRadius: 16, overflow: "hidden", marginBottom: 22 }}>
               {openTasks.length === 0 && (
@@ -321,13 +382,20 @@ export default function App() {
               )}
               {openTasks.map((t, i) => {
                 const isActive = t.id === activeId;
+                const isCarrying = carryingId === t.id;
+                const press = isActive ? {} : {
+                  onClick: () => onTaskTap(t.id),
+                  onMouseDown: () => carryStart(t.id), onMouseUp: carryEnd, onMouseLeave: carryEnd,
+                  onTouchStart: () => carryStart(t.id), onTouchEnd: carryEnd, onTouchMove: carryEnd,
+                };
                 return (
-                  <div key={t.id}
-                    onClick={!isActive ? () => startTask(t.id) : undefined}
-                    style={{ display: "flex", alignItems: "center", gap: 11,
+                  <div key={t.id} {...press}
+                    style={{ position: "relative", display: "flex", alignItems: "center", gap: 11,
                     padding: "15px 16px", borderTop: i === 0 ? "none" : `0.5px solid ${C.line}`,
-                    cursor: !isActive ? "pointer" : "default" }}>
+                    cursor: !isActive ? "pointer" : "default", userSelect: "none",
+                    borderRadius: isCarrying ? 12 : 0 }}>
                     <button className="star-btn" onClick={(e) => { e.stopPropagation(); toggleStar(t.id); }}
+                      onMouseDown={(e) => e.stopPropagation()} onTouchStart={(e) => e.stopPropagation()}
                       style={{ color: t.star ? C.star : "#48484a" }}>{t.star ? "★" : "☆"}</button>
                     <span style={{ width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
                       display: "grid", placeItems: "center", background: "transparent",
@@ -337,6 +405,9 @@ export default function App() {
                       <span style={{ fontSize: 11, color: C.accent, fontWeight: 700, letterSpacing: 1 }}>NOW</span>
                     ) : (
                       <span style={{ fontSize: 20, color: "#48484a", lineHeight: 1 }}>›</span>
+                    )}
+                    {isCarrying && (
+                      <div className="carrybar" style={{ position: "absolute", left: 0, bottom: 0, height: 2, width: "100%" }} />
                     )}
                   </div>
                 );
@@ -400,13 +471,9 @@ export default function App() {
           paddingBottom: "calc(env(safe-area-inset-bottom, 0px) + 12px)",
           background: "rgba(0,0,0,0.72)", backdropFilter: "blur(20px)",
           WebkitBackdropFilter: "blur(20px)", borderTop: `0.5px solid ${C.line}` }}>
-          {phase === "breakDone" ? (
-            <button onClick={nextTask} style={roundBtn(C.accent, "#fff")}>次へ</button>
-          ) : (
-            <button onClick={toggleRun} style={roundBtn(C.card2, running ? C.text : C.accent)}>
-              {running ? "停止" : "再開"}
-            </button>
-          )}
+          <button onClick={toggleRun} style={roundBtn(C.card2, running ? C.text : C.accent)}>
+            {running ? "停止" : "再開"}
+          </button>
           <button onClick={() => completeTask(activeTask.id)} style={roundBtn(C.card2, C.text)}>完了</button>
         </div>
       )}
