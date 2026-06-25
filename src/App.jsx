@@ -68,14 +68,16 @@ export default function App() {
 
   useEffect(() => {
     if (!running) return;
-    // Anchor the deadline from the current remaining time whenever the timer
-    // (re)starts or the phase changes.
-    deadlineRef.current = Date.now() + secondsLeft * 1000;
+    // deadlineRef (an absolute end-of-phase timestamp) is owned by the actions
+    // that start/resume the timer, so the work→break timeline stays continuous
+    // even across sleep. This effect only reads it.
     const tick = () => {
+      if (deadlineRef.current == null) return;
       const remaining = Math.round((deadlineRef.current - Date.now()) / 1000);
       if (remaining <= 0) { setSecondsLeft(0); handlePhaseEnd(); }
       else { setSecondsLeft(remaining); }
     };
+    tick();
     const id = setInterval(tick, 250);
     // Recompute immediately when the page returns to the foreground (e.g. after
     // the iPhone wakes from sleep), since setInterval may have been suspended.
@@ -83,7 +85,7 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisible);
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
     // eslint-disable-next-line
-  }, [running, phase]);
+  }, [running]);
 
   function beep() {
     try {
@@ -102,14 +104,25 @@ export default function App() {
     // Read current values via refs: this runs from the long-lived interval, whose
     // closure can be stale after tasks/activeId changed within the same phase.
     if (phaseRef.current === "work") {
-      // The 25-minute focus block elapsed → 5-minute break. Bank the active
-      // task's worked time so the break minutes are not counted toward it.
-      setTasks((ts) => bankSegment(ts, activeIdRef.current));
-      setPhase("break"); setSecondsLeft(BREAK_MIN * 60);
+      // The 25-minute focus block elapsed → 5-minute break. Bank the active task's
+      // worked time only up to when the block ended (not to wake time), so a long
+      // sleep doesn't inflate the recorded minutes.
+      const workEnd = deadlineRef.current;
+      setTasks((ts) => bankSegment(ts, activeIdRef.current, workEnd));
+      // Continue the absolute timeline so the break still elapses during sleep:
+      // it ends BREAK minutes after the work block ended, not after wake.
+      deadlineRef.current = workEnd + BREAK_MIN * 60 * 1000;
+      if (Date.now() >= deadlineRef.current) {
+        // Away long enough that the break has already finished too → land stopped.
+        setPhase("breakDone"); setSecondsLeft(0); setRunning(false);
+      } else {
+        setPhase("break");
+        setSecondsLeft(Math.round((deadlineRef.current - Date.now()) / 1000));
+      }
     } else if (phaseRef.current === "break") {
       // End of the 30-minute cycle: stop and wait for a manual "次へ", so the
       // same task is never recorded across extra cycles without the user noticing.
-      setPhase("breakDone"); setRunning(false);
+      setPhase("breakDone"); setSecondsLeft(0); setRunning(false);
     }
   }
   function sortByStar(list) { return [...list].sort((a, b) => (b.star ? 1 : 0) - (a.star ? 1 : 0)); }
@@ -133,7 +146,15 @@ export default function App() {
     setActiveId(id);
     // Pomodoro: keep the running 25-minute block when switching tasks. Only start
     // a fresh block when we're not already inside a focus phase (idle / after break).
-    if (phase !== "work") { setPhase("work"); setSecondsLeft(WORK_MIN * 60); }
+    if (phase !== "work") {
+      setPhase("work"); setSecondsLeft(WORK_MIN * 60);
+      deadlineRef.current = Date.now() + WORK_MIN * 60 * 1000;
+    } else if (!running) {
+      // Resuming a paused block (possibly on a different task): re-anchor from the
+      // frozen remaining time.
+      deadlineRef.current = Date.now() + secondsLeft * 1000;
+    }
+    // else: switching tasks while running → keep the live deadline (block continues).
     setRunning(true);
   }
   function toggleRun() {
@@ -143,6 +164,8 @@ export default function App() {
       if (goingToRun) setTasks((ts) => ts.map((t) => (t.id === activeId ? { ...t, startedAt: Date.now() } : t)));
       else setTasks((ts) => bankSegment(ts, activeId));
     }
+    // On resume, re-anchor the phase deadline from the frozen remaining time.
+    if (goingToRun) deadlineRef.current = Date.now() + secondsLeft * 1000;
     setRunning(goingToRun);
   }
   // Move an unfinished task out of the list and into the memo, to carry it over
@@ -475,10 +498,10 @@ function fmtMins(m) {
 // Add the active task's in-progress segment to its accumulated minutes and clear
 // startedAt. Used when work pauses, the active task changes, or a break begins,
 // so each task only accrues actual worked time (breaks excluded).
-function bankSegment(list, id) {
+function bankSegment(list, id, endTs = Date.now()) {
   return list.map((t) => {
     if (t.id !== id || !t.startedAt) return t;
-    const seg = Math.max(1, Math.round((Date.now() - t.startedAt) / 60000));
+    const seg = Math.max(1, Math.round((endTs - t.startedAt) / 60000));
     return { ...t, mins: (t.mins || 0) + seg, startedAt: null };
   });
 }
