@@ -28,7 +28,7 @@ function loadState() {
     return null;
   }
 }
-const saved = loadState();
+const saved = reconcile(loadState());
 
 export default function App() {
   const [raw, setRaw] = useState("");
@@ -36,9 +36,10 @@ export default function App() {
   const [activeId, setActiveId] = useState(saved?.activeId ?? null);
   const [phase, setPhase] = useState(saved?.phase ?? "idle");
   const [secondsLeft, setSecondsLeft] = useState(saved?.secondsLeft ?? WORK_MIN * 60);
-  // The ticking timer is never auto-resumed after a reload — the user taps 再開.
-  // This avoids the clock silently "catching up" on time the app was closed.
-  const [running, setRunning] = useState(false);
+  // The timer DOES catch up across reloads/sleep: reconcile() (above) reconstructs
+  // the running state from the persisted absolute deadline vs. the real clock, so
+  // time keeps elapsing while the phone is asleep or the PWA was evicted.
+  const [running, setRunning] = useState(saved?.running ?? false);
   const [addText, setAddText] = useState("");
   // Free-text memo for on-hold / follow-up items. Shared across both screens
   // and persisted, so pending notes survive reloads until promoted to a task.
@@ -46,10 +47,10 @@ export default function App() {
   const [menu, setMenu] = useState(null); // { id, type, top, right } anchor for a task's action menu
   // Last completed session's summary, shown on the start screen after a reset.
   const [lastSummary, setLastSummary] = useState(saved?.lastSummary ?? null);
-  // Absolute timestamp (ms) when the current running phase ends. The countdown
-  // is derived from this rather than decremented tick-by-tick, so it stays
-  // accurate even if iOS sleeps/throttles timers while the screen is off.
-  const deadlineRef = useRef(null);
+  // Absolute timestamp (ms) when the current running phase ends. The countdown is
+  // derived from this (not decremented tick-by-tick) and persisted, so it stays
+  // accurate even if iOS sleeps/throttles timers or evicts the app entirely.
+  const deadlineRef = useRef(saved?.deadline ?? null);
   // Refs mirror the latest state so the long-lived timer interval (which keeps a
   // stale closure between phase changes) always reads current values.
   const activeIdRef = useRef(activeId); activeIdRef.current = activeId;
@@ -61,10 +62,11 @@ export default function App() {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ tasks, activeId, phase, secondsLeft, memo, lastSummary })
+        JSON.stringify({ tasks, activeId, phase, secondsLeft, memo, lastSummary,
+          deadline: deadlineRef.current, running })
       );
     } catch (e) {}
-  }, [tasks, activeId, phase, secondsLeft, memo, lastSummary]);
+  }, [tasks, activeId, phase, secondsLeft, memo, lastSummary, running]);
 
   useEffect(() => {
     if (!running) return;
@@ -79,11 +81,19 @@ export default function App() {
     };
     tick();
     const id = setInterval(tick, 250);
-    // Recompute immediately when the page returns to the foreground (e.g. after
-    // the iPhone wakes from sleep), since setInterval may have been suspended.
-    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
+    // Recompute immediately when the page returns to the foreground (e.g. after the
+    // iPhone wakes from sleep), since setInterval may have been suspended. Listen on
+    // several events because iOS standalone PWAs fire these inconsistently.
+    const onWake = () => { if (document.visibilityState !== "hidden") tick(); };
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    window.addEventListener("pageshow", onWake);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+      window.removeEventListener("pageshow", onWake);
+    };
     // eslint-disable-next-line
   }, [running]);
 
@@ -504,6 +514,38 @@ function bankSegment(list, id, endTs = Date.now()) {
     const seg = Math.max(1, Math.round((endTs - t.startedAt) / 60000));
     return { ...t, mins: (t.mins || 0) + seg, startedAt: null };
   });
+}
+// On load, reconstruct a running timer from the persisted absolute deadline so
+// elapsed time counts even while the phone slept or the PWA was evicted. Advances
+// work → break → stop based on the real clock, so reopening after 30+ minutes
+// lands on the stopped post-break state rather than restarting the break.
+function reconcile(saved) {
+  if (!saved) return saved;
+  if (!saved.running || saved.deadline == null) {
+    return { ...saved, running: false, deadline: null };
+  }
+  const now = Date.now();
+  let { tasks, phase, activeId, deadline } = saved;
+  if (phase === "work") {
+    if (now < deadline) {
+      return { ...saved, secondsLeft: Math.round((deadline - now) / 1000) };
+    }
+    // The work block ended while away → bank its time up to the block's end.
+    tasks = bankSegment(tasks, activeId, deadline);
+    const breakEnd = deadline + BREAK_MIN * 60 * 1000;
+    if (now < breakEnd) {
+      return { ...saved, tasks, phase: "break", deadline: breakEnd,
+        secondsLeft: Math.round((breakEnd - now) / 1000) };
+    }
+    return { ...saved, tasks, phase: "breakDone", running: false, deadline: null, secondsLeft: 0 };
+  }
+  if (phase === "break") {
+    if (now < deadline) {
+      return { ...saved, secondsLeft: Math.round((deadline - now) / 1000) };
+    }
+    return { ...saved, phase: "breakDone", running: false, deadline: null, secondsLeft: 0 };
+  }
+  return { ...saved, running: false, deadline: null };
 }
 function primaryBtn(d) {
   return { width: "100%", marginTop: 16, padding: "16px", borderRadius: 14, fontSize: 17, fontWeight: 600,
